@@ -1,0 +1,75 @@
+#!/bin/bash
+
+# Configurar el nombre del bucket de S3
+s3_bucket="cubetadepruebas1.0"
+s3_prefix="cloudwatch-logs-prueba2/"
+
+# Listar log groups disponibles en CloudWatch
+echo "Listando log groups disponibles en CloudWatch..."
+log_groups=$(aws logs describe-log-groups --query 'logGroups[].logGroupName' --output text)
+
+if [ -z "$log_groups" ]; then
+    echo "No se encontraron log groups en CloudWatch."
+    exit 1
+fi
+
+echo "Log groups disponibles:"
+echo "$log_groups"
+
+# Función para verificar el estado de la última tarea de exportación
+check_export_task_status() {
+    local task_id=$1
+    while : ; do
+        status=$(aws logs describe-export-tasks --task-id "$task_id" --query 'exportTasks[0].status.code' --output text)
+        if [[ "$status" == "COMPLETED" ]]; then
+            echo "La tarea de exportación '$task_id' se completó exitosamente."
+            break
+        elif [[ "$status" == "FAILED" ]]; then
+            echo "La tarea de exportación '$task_id' falló."
+            break
+        else
+            echo "La tarea de exportación '$task_id' está en estado '$status'. Esperando..."
+            sleep 20
+        fi
+    done
+}
+
+# Exportar cada log group a S3
+for log_group in $log_groups; do
+    echo "Exportando el log group '$log_group' a S3..."
+
+    # Medir el tiempo de exportación
+    start_time=$SECONDS
+
+    # Generar un nombre de tarea único
+    export_task_id="export-task-$(date +%s)-${log_group//\//-}"
+
+    # Definir el rango de tiempo para la exportación (últimos 7 días en este ejemplo)
+    start_time=$(date -d '90 days ago' +%s)000
+    end_time=$(date +%s)000
+
+    # Crear tarea de exportación
+    task_id=$(aws logs create-export-task \
+        --task-name "$export_task_id" \
+        --log-group-name "$log_group" \
+        --from $start_time \
+        --to $end_time \
+        --destination "$s3_bucket" \
+        --destination-prefix "${s3_prefix}${log_group//\//-}/" \
+        --query 'taskId' --output text)
+
+    if [ $? -eq 0 ]; then
+        echo "Tarea de exportación para '$log_group' creada exitosamente con ID '$task_id'."
+        # Verificar el estado de la tarea de exportación
+        check_export_task_status "$task_id"
+
+
+        # Calcular y mostrar el tiempo tomado
+        export_end_time=$SECONDS
+        duration=$(( export_end_time - export_start_time ))
+        echo "Tiempo tomado para exportar '$log_group': $duration segundos."
+    else
+        echo "Error al crear la tarea de exportación para '$log_group'."
+    fi
+done
+
